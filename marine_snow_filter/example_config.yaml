@@ -1,0 +1,146 @@
+# =============================================================================
+# Marine Snow Filter — Pipeline Configuration
+# =============================================================================
+# All parameters shown with their defaults. Override via CLI flags or this file.
+# Paths marked "null" are required and must be set before running.
+
+# ---- Global settings --------------------------------------------------------
+global:
+  workers: 8              # Number of parallel workers (default: cpu_count - 1)
+  verbose: false          # Enable DEBUG-level logging
+  dry_run: false          # Compute and report without writing output files
+  log_dir: null           # Directory for structured run logs (optional)
+
+# ---- Image Pre-processing ---------------------------------------------------
+# Goal: suppress backscatter, haze, and marine snow brightness BEFORE SfM
+# so that COLMAP never triangulates particles as 3D points.
+preprocess:
+  input_dir: null         # Required — path to raw underwater images
+  output_dir: null        # Required — path for processed images (preserves structure)
+
+  # Dehaze method: dcp | homomorphic | retinex | fusion | rcp
+  method: dcp
+
+  # Set true to run ALL dehaze methods and output to per-method subdirectories
+  # for visual comparison. Color correction and CLAHE applied uniformly.
+  compare: false
+
+  # --- Dark Channel Prior (dcp) parameters ---
+  patch_size: 15          # Local patch size for dark channel computation
+  omega: 0.85             # Haze removal strength [0-1]. Lower than standard 0.95
+                          # because underwater over-correction destroys color.
+                          # 0.85 is a good starting point for moderate backscatter.
+  t_min: 0.1              # Minimum transmission value. Prevents division-by-near-zero
+                          # in heavily hazed regions. Increase to 0.2 if results are noisy.
+
+  # --- Homomorphic filtering parameters ---
+  gamma_low: 0.5          # Gain for low frequencies (illumination). <1 compresses dynamic range.
+  gamma_high: 1.5         # Gain for high frequencies (reflectance). >1 enhances edges/detail.
+  cutoff: 30              # Gaussian high-pass filter cutoff (pixels). Higher = less smoothing.
+
+  # --- Multi-scale Retinex (retinex) parameters ---
+  retinex_scales:         # Gaussian blur sigmas for each retinex scale.
+    - 15                  # Small scale — captures fine detail
+    - 80                  # Medium scale — local contrast
+    - 250                 # Large scale — global illumination normalization
+
+  # --- White balance ---
+  # Method: grayworld | max-rgb | shades-of-gray | none
+  wb_method: grayworld
+  p_norm: 6               # Minkowski norm for shades-of-gray (higher = closer to max-RGB)
+
+  # --- Per-channel percentile stretch ---
+  stretch: true           # Clip each channel to [1st, 99th] percentile and stretch to [0, 255]
+
+  # --- CLAHE (Contrast-Limited Adaptive Histogram Equalization) ---
+  clip_limit: 2.0         # CLAHE clip limit. Higher = more contrast. 2.0 is conservative.
+  tile_size: 8            # CLAHE tile grid size. 8 works well for most resolutions.
+  no_clahe: false         # Set true to disable CLAHE entirely
+
+  # --- Particle suppression ---
+  suppress_particles: false  # Median filter bright isolated pixels (marine snow specks).
+                             # Experimental — may soften fine texture. Test on your data.
+
+# ---- COLMAP points3D Filter --------------------------------------------------
+# Goal: remove marine-snow-derived 3D points from the SfM point cloud
+# before Gaussian splat training.
+colmap_filter:
+  input: null             # Required — path to points3D.txt or points3D.bin
+  output: null            # Required — output path (same format as input)
+
+  # Track length: THE strongest marine snow discriminator.
+  # Particles move between frames so they triangulate from only 2-3 views.
+  # Static geometry appears in many views. Start at 3; try 4-5 for heavy particulate.
+  min_track_length: 3
+
+  # Reprojection error: poorly-triangulated particles have high error.
+  max_reproj_error: 1.0   # pixels
+
+  # Neutral color filter: marine snow is bright + desaturated.
+  # CAUTION: gray rock, silt, metal are also low-saturation.
+  # By default, only applies to short-track points to reduce false positives.
+  max_color_saturation: 0.15   # HSV saturation [0-1]. Points below this are "neutral".
+  min_color_brightness: 180    # HSV value [0-255]. Points above this are "bright".
+  max_track_for_color: 5       # Only apply color filter to points with track <= this.
+                               # Set 0 to apply to all points (risky).
+
+  # Statistical outlier removal using Median Absolute Deviation (MAD).
+  # More robust than std for skewed underwater point distributions.
+  sigma_outlier: 3.0      # Points beyond median + sigma * 1.4826 * MAD are removed.
+
+  # Local density filter (expensive on large clouds — default disabled).
+  min_neighbors: 0        # Set >0 to enable. Marine snow is spatially random; scene is dense.
+  neighbor_radius: 0.5    # meters — search radius for neighbor counting
+
+  # Temporal adjacency filter.
+  # If a point's track spans only a few consecutive image IDs, it's likely a
+  # particle that appeared briefly. Complements track-length filter.
+  max_temporal_span: 3    # Max image ID span to flag as temporally constrained
+  min_track_for_temporal: 3  # Only apply to points with at least this many track entries
+
+  # Disable individual filters
+  no_track_filter: false
+  no_error_filter: false
+  no_color_filter: false
+  no_outlier_filter: false
+  no_density_filter: false
+  no_temporal_filter: false
+
+# ---- Gaussian Splat .ply Post-filter -----------------------------------------
+# Goal: remove marine snow gaussians from the trained 3DGS model.
+splat_filter:
+  input: null             # Required — path to input .ply (3DGS format)
+  output: null            # Optional — default: <input_stem>_filtered.ply
+
+  # Opacity: volumetric haze = many near-transparent gaussians.
+  # Opacity is stored as logit; threshold is in sigmoid-space [0-1].
+  min_opacity: 0.02       # Remove gaussians with opacity below this
+
+  # Scale: diffuse haze produces abnormally large, bloated gaussians.
+  # If null, auto-computed as median + 3*MAD of per-gaussian max scale.
+  max_scale: null
+
+  # Distance outlier (MAD-based, same logic as COLMAP filter).
+  max_distance_sigma: 3.0
+
+  # Neutral color filter — the marine snow fingerprint:
+  # bright + gray + see-through. Triple criterion minimizes false positives.
+  neutral_filter: true
+  neutral_v_min: 0.7      # HSV value threshold [0-1]
+  neutral_s_max: 0.15     # HSV saturation ceiling [0-1]
+  neutral_opacity_max: 0.3  # Max opacity (sigmoid) for neutral filter
+
+  # Volume density filter (expensive — default disabled).
+  density_filter: false
+  density_radius: 0.5     # meters
+  density_min_neighbors: 5
+
+  # Elongation filter: catches needle-like gaussians from poor triangulation.
+  # Marine snow often produces these because particles appear in only 2-3 views
+  # from similar angles, giving poor depth estimation.
+  elongation_filter: true
+  max_elongation_ratio: 50.0  # max_scale / min_scale ratio threshold
+
+  # Diagnostic histograms (opacity, scale, color distributions before/after).
+  # Invaluable for threshold tuning.
+  save_histograms: false

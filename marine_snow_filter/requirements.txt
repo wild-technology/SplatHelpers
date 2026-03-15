@@ -1,0 +1,9 @@
+numpy
+opencv-python-headless
+plyfile
+scipy
+tqdm
+click
+piexif
+pyyaml
+matplotlib
